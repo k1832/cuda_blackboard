@@ -23,7 +23,7 @@ CudaBlackboardPublisher<T>::CudaBlackboardPublisher(
 
   negotiated_pub_->add_supported_type<NegotiationStruct<T>>(
     1.0,
-    rclcpp::QoS(1),  //.durability_volatile(),
+    rclcpp::QoS(1).durability_volatile(),
     pub_options);
 
   std::string ros_type_name = NegotiationStruct<typename T::ros_type>::supported_type_name;
@@ -61,7 +61,22 @@ void CudaBlackboardPublisher<T>::publish(std::unique_ptr<const T> cuda_msg_ptr)
       publisher->get_intra_process_subscription_count();  // tickets are only given to intra process
                                                           // subscribers
 
+    RCLCPP_INFO_THROTTLE(
+      node_.get_logger(),
+      *node_.get_clock(),
+      1000,
+      "[CUDA_BB_PUB] intra_process_subs=%zu, regular_subs=%zu, type_negotiated=%s",
+      tickets,
+      publisher->get_subscription_count(),
+      negotiated_pub_->type_was_negotiated<NegotiationStruct<T>>() ? "yes" : "no");
+
     if (tickets == 0) {
+      RCLCPP_INFO_THROTTLE(
+        node_.get_logger(),
+        *node_.get_clock(),
+        1000,
+        "[CUDA_BB_PUB] 0 intra-process subs - not publishing. "
+        "Ensure subscriber is in same process with use_intra_process_comms=true");
       return;
     }
 
