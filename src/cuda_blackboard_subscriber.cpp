@@ -4,6 +4,7 @@
 #include "cuda_blackboard/cuda_blackboard.hpp"
 #include "cuda_blackboard/negotiated_types.hpp"
 
+#include <chrono>
 #include <functional>
 
 namespace cuda_blackboard
@@ -28,8 +29,8 @@ CudaBlackboardSubscriber<T>::CudaBlackboardSubscriber(
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
 
   negotiated_sub_->add_supported_callback<NegotiationStruct<T>>(
-    1.0, rclcpp::QoS(1), std::bind(&CudaBlackboardSubscriber<T>::instanceIdCallback, this, _1),
-    sub_options);
+    1.0, rclcpp::QoS(1).durability_volatile(),
+    std::bind(&CudaBlackboardSubscriber<T>::instanceIdCallback, this, _1), sub_options);
 
   std::string ros_type_name = NegotiationStruct<typename T::ros_type>::supported_type_name;
 
@@ -40,6 +41,12 @@ CudaBlackboardSubscriber<T>::CudaBlackboardSubscriber(
   negotiated_sub_->add_compatible_subscription(compatible_sub_, ros_type_name, 0.1);
 
   negotiated_sub_->start();
+
+  // Create a timer to periodically re-send supported types until negotiation succeeds
+  // This fixes the race condition where the publisher may not be ready when we first send
+  negotiation_retry_timer_ = node.create_wall_timer(
+    std::chrono::milliseconds(500),
+    std::bind(&CudaBlackboardSubscriber<T>::retryNegotiationCallback, this));
 }
 
 template <typename T>
@@ -61,8 +68,8 @@ CudaBlackboardSubscriber<T>::CudaBlackboardSubscriber(
   sub_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
 
   negotiated_sub_->add_supported_callback<NegotiationStruct<T>>(
-    1.0, rclcpp::QoS(1), std::bind(&CudaBlackboardSubscriber<T>::instanceIdCallback, this, _1),
-    sub_options);
+    1.0, rclcpp::QoS(1).durability_volatile(),
+    std::bind(&CudaBlackboardSubscriber<T>::instanceIdCallback, this, _1), sub_options);
 
   std::string ros_type_name = NegotiationStruct<typename T::ros_type>::supported_type_name;
 
@@ -73,11 +80,83 @@ CudaBlackboardSubscriber<T>::CudaBlackboardSubscriber(
   negotiated_sub_->add_compatible_subscription(compatible_sub_, ros_type_name, 0.1);
 
   negotiated_sub_->start();
+
+  // Create a timer to periodically re-send supported types until negotiation succeeds
+  // This fixes the race condition where the publisher may not be ready when we first send
+  negotiation_retry_timer_ = node.create_wall_timer(
+    std::chrono::milliseconds(500),
+    std::bind(&CudaBlackboardSubscriber<T>::retryNegotiationCallback, this));
+}
+
+template <typename T>
+void CudaBlackboardSubscriber<T>::retryNegotiationCallback()
+{
+  // Safety check - don't do anything if already succeeded
+  if (negotiation_succeeded_) {
+    if (negotiation_retry_timer_) {
+      negotiation_retry_timer_->cancel();
+      negotiation_retry_timer_.reset();
+    }
+    return;
+  }
+
+  // Check if negotiation has actually succeeded by checking the negotiated topics info
+  // This is only set to success=true when the publisher successfully negotiates
+  const auto & topics_info = negotiated_sub_->get_negotiated_topics_info();
+  if (topics_info.success && !topics_info.negotiated_topics.empty()) {
+    // Negotiation succeeded, stop the timer
+    negotiation_succeeded_ = true;
+    if (negotiation_retry_timer_) {
+      negotiation_retry_timer_->cancel();
+      negotiation_retry_timer_.reset();
+    }
+    RCLCPP_INFO(
+      node_.get_logger(),
+      "Negotiation succeeded with %zu topics, stopping retry timer",
+      topics_info.negotiated_topics.size());
+    return;
+  }
+
+  // Limit retries to avoid infinite loops (30 retries * 500ms = 15 seconds max)
+  if (++negotiation_retry_count_ > 30) {
+    RCLCPP_WARN(node_.get_logger(), "Negotiation retry limit reached, stopping timer");
+    if (negotiation_retry_timer_) {
+      negotiation_retry_timer_->cancel();
+      negotiation_retry_timer_.reset();
+    }
+    return;
+  }
+
+  // Log what types we're sending for debugging
+  const auto & supported_types = negotiated_sub_->get_supported_types();
+  std::string types_str;
+  for (const auto & [key, info] : supported_types) {
+    types_str += info.supported_type.ros_type_name + "+" +
+                 info.supported_type.supported_type_name + " ";
+  }
+  RCLCPP_INFO(
+    node_.get_logger(),
+    "Re-sending supported types for negotiation (retry %d): [%s]",
+    negotiation_retry_count_,
+    types_str.c_str());
+
+  // Re-send supported types to trigger negotiation
+  // This is needed because with volatile QoS, the initial message may be lost
+  // if the publisher's subscription wasn't ready yet
+  negotiated_sub_->start();
 }
 
 template <typename T>
 void CudaBlackboardSubscriber<T>::instanceIdCallback(const std_msgs::msg::UInt64 & instance_id_msg)
 {
+  // Stop retry timer if still running - negotiation has succeeded
+  if (negotiation_retry_timer_ && !negotiation_succeeded_) {
+    negotiation_succeeded_ = true;
+    negotiation_retry_timer_->cancel();
+    negotiation_retry_timer_.reset();
+    RCLCPP_INFO(node_.get_logger(), "Negotiation succeeded (received instance ID), stopping retry timer");
+  }
+
   if (compatible_sub_ && negotiated_sub_->get_negotiated_topic_publisher_count() > 0) {
     const std::string ros_type_name = NegotiationStruct<typename T::ros_type>::supported_type_name;
     negotiated_sub_->remove_compatible_subscription<typename T::ros_type>(

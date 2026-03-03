@@ -23,7 +23,7 @@ CudaBlackboardPublisher<T>::CudaBlackboardPublisher(
 
   negotiated_pub_->add_supported_type<NegotiationStruct<T>>(
     1.0,
-    rclcpp::QoS(1),  //.durability_volatile(),
+    rclcpp::QoS(1).durability_volatile(),
     pub_options);
 
   std::string ros_type_name = NegotiationStruct<typename T::ros_type>::supported_type_name;
@@ -62,6 +62,15 @@ void CudaBlackboardPublisher<T>::publish(std::unique_ptr<const T> cuda_msg_ptr)
 
   // When we want to publish cuda data, we instead use the blackboard
   if (publish_blackboard_msg) {
+    RCLCPP_INFO_THROTTLE(
+      node_.get_logger(),
+      *node_.get_clock(),
+      1000,
+      "[CUDA_BB_PUB] intra_process_subs=%zu, regular_subs=%zu, type_negotiated=%s",
+      tickets,
+      publisher != nullptr ? publisher->get_subscription_count() : 0,
+      negotiated_pub_->type_was_negotiated<NegotiationStruct<T>>() ? "yes" : "no");
+
     if (publish_ros_msg) {
       tickets++;
     }

@@ -29,11 +29,16 @@ private:
 
   void compatibleCallback(const std::shared_ptr<const typename T::ros_type> & ros_msg_ptr);
 
+  void retryNegotiationCallback();
+
   std::function<void(std::shared_ptr<const T> cuda_msg)> callback_{};
 
   rclcpp::Node & node_;
   std::shared_ptr<negotiated::NegotiatedSubscription> negotiated_sub_;
   typename rclcpp::Subscription<typename T::ros_type>::SharedPtr compatible_sub_;
+  rclcpp::TimerBase::SharedPtr negotiation_retry_timer_;
+  bool negotiation_succeeded_{false};
+  int negotiation_retry_count_{0};
 };
 
 }  // namespace cuda_blackboard
